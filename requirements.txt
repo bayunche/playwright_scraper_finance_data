@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+playwright
+python-dateutil
+logging
+asyncio
+beautifulsoup4
+playwright-stealth
+lxml
+aiohttp
+pandas
