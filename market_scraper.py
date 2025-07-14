@@ -3,12 +3,287 @@ import logging
 import sys # 导入sys模块
 import traceback
 import pandas as pd # 导入pandas
+from datetime import datetime
+import json
+import re
 from playwright.async_api import async_playwright, TimeoutError
 from playwright.sync_api import sync_playwright # 导入sync_playwright
 from tonghuashun_stats import scrape_today
 # 配置日志记录
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+class SimpleSectorFlowScraper:
+    """简化版美股板块资金流向爬取器（多源）"""
+
+    def __init__(self, headless: bool = True):
+        self.headless = headless
+
+    async def scrape_yahoo_sectors(self):
+        """从Yahoo Finance爬取板块数据"""
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=self.headless)
+            context = await browser.new_context(
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            )
+            page = await context.new_page()
+            try:
+                print("正在访问Yahoo Finance板块页面...")
+                await page.goto('https://finance.yahoo.com/sectors/', wait_until='domcontentloaded', timeout=60000)
+                await page.wait_for_timeout(8000)
+                # 适配新版Yahoo Finance板块表格结构
+                await page.wait_for_selector('table.yf-k3njn8', timeout=10000)
+                sector_data = await page.evaluate('''
+                    () => {
+                        const data = [];
+                        const table = document.querySelector('table.yf-k3njn8');
+                        if (table) {
+                            const rows = table.querySelectorAll('tbody tr');
+                            rows.forEach(row => {
+                                const cells = row.querySelectorAll('td');
+                                if (cells.length === 3) {
+                                    const name = cells[0].textContent.trim();
+                                    const weightText = cells[1].textContent.trim();
+                                    const ytdReturnText = cells[2].textContent.trim();
+                                    // 提取百分比数值
+                                    const weightMatch = weightText.match(/([+-]?\\d+\\.?\\d*)%/);
+                                    const ytdReturnMatch = ytdReturnText.match(/([+-]?\\d+\\.?\\d*)%/);
+                                    if (name && ytdReturnMatch) {
+                                        data.push({
+                                            name: name,
+                                            percentage: parseFloat(ytdReturnMatch[1]),
+                                            changeText: ytdReturnText,
+                                            volumeText: weightMatch ? weightMatch[1] : '0'
+                                        });
+                                    }
+                                }
+                            });
+                        }
+                        return data;
+                    }
+                ''')
+                print(f"从Yahoo Finance获取到 {len(sector_data)} 条原始数据")
+                processed_data = []
+                for item in sector_data:
+                    # 这里volume用权重百分比，实际资金流量需结合市值等，暂用权重模拟
+                    volume = float(item['volumeText'])
+                    net_flow = abs(item['percentage']) * volume if volume else abs(item['percentage'])
+                    processed_data.append({
+                        'sector_name': item['name'],
+                        'percentage': item['percentage'],
+                        'net_flow': net_flow,
+                        'volume': volume,
+                        'flow_direction': 'inflow' if item['percentage'] > 0 else 'outflow',
+                        'timestamp': datetime.now().isoformat()
+                    })
+                await browser.close()
+                return processed_data
+            except Exception as e:
+                print(f"Yahoo Finance爬取失败: {e}")
+                try:
+                    await page.screenshot(path='yahoo_finance_debug.png')
+                    print("已保存调试截图: yahoo_finance_debug.png")
+                except:
+                    pass
+                await browser.close()
+                return []
+
+    async def scrape_marketwatch_sectors(self):
+        """从MarketWatch爬取板块数据 - 备选数据源"""
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=self.headless)
+            context = await browser.new_context(
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            )
+            page = await context.new_page()
+            try:
+                print("正在访问MarketWatch板块页面...")
+                await page.goto('https://www.marketwatch.com/investing/sectors', wait_until='networkidle')
+                await page.wait_for_timeout(3000)
+                # 由于页面可能被验证码拦截或结构变化，以下选择器可能无效
+                # 增加异常处理和提示
+                try:
+                    await page.wait_for_selector('.table--primary, .data-table, table', timeout=10000)
+                except Exception:
+                    print("MarketWatch页面未找到预期的表格元素，可能被验证码拦截或页面结构已变更。")
+                    await browser.close()
+                    return []
+                sector_data = await page.evaluate('''
+                    () => {
+                        const data = [];
+                        const tableSelectors = [
+                            '.table--primary',
+                            '.data-table',
+                            'table.table',
+                            '.sector-table',
+                            'table'
+                        ];
+                        let targetTable = null;
+                        for (const selector of tableSelectors) {
+                            targetTable = document.querySelector(selector);
+                            if (targetTable) break;
+                        }
+                        if (targetTable) {
+                            const rows = targetTable.querySelectorAll('tbody tr, tr');
+                            rows.forEach(row => {
+                                const cells = row.querySelectorAll('td');
+                                if (cells.length >= 3) {
+                                    const nameElem = cells[0].querySelector('a') || cells[0];
+                                    let changeElem = null;
+                                    for (let i = 1; i < cells.length; i++) {
+                                        const cellText = cells[i].textContent;
+                                        if (cellText.includes('%')) {
+                                            changeElem = cells[i];
+                                            break;
+                                        }
+                                    }
+                                    if (nameElem && changeElem) {
+                                        const name = nameElem.textContent.trim();
+                                        const changeText = changeElem.textContent.trim();
+                                        const changeMatch = changeText.match(/([+-]?\\d+\\.?\\d*)%/);
+                                        if (changeMatch && name.length > 0) {
+                                            const percentage = parseFloat(changeMatch[1]);
+                                            data.push({
+                                                name: name,
+                                                percentage: percentage,
+                                                changeText: changeText,
+                                                volumeText: '0'
+                                            });
+                                        }
+                                    }
+                                }
+                            });
+                        }
+                        return data;
+                    }
+                ''')
+                print(f"从MarketWatch获取到 {len(sector_data)} 条原始数据")
+                processed_data = []
+                for item in sector_data:
+                    processed_data.append({
+                        'sector_name': item['name'],
+                        'percentage': item['percentage'],
+                        'net_flow': abs(item['percentage']),
+                        'volume': 0,
+                        'flow_direction': 'inflow' if item['percentage'] > 0 else 'outflow',
+                        'timestamp': datetime.now().isoformat()
+                    })
+                await browser.close()
+                return processed_data
+            except Exception as e:
+                print(f"MarketWatch爬取失败: {e}")
+                await browser.close()
+                return []
+
+    async def scrape_finviz_sectors(self):
+        """从Finviz爬取板块数据"""
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=self.headless)
+            context = await browser.new_context()
+            page = await context.new_page()
+            try:
+                await page.goto('https://finviz.com/groups.ashx?g=sector&v=210&o=name', wait_until='networkidle')
+                await page.wait_for_timeout(3000)
+                await page.wait_for_selector('.groups-table', timeout=15000)
+                sector_data = await page.evaluate('''
+                    () => {
+                        const rows = document.querySelectorAll('.groups-table tr');
+                        const data = [];
+                        for (let i = 1; i < rows.length; i++) {
+                            const cells = rows[i].querySelectorAll('td');
+                            if (cells.length >= 7) {
+                                const name = cells[0].textContent.trim();
+                                const changeText = cells[2].textContent.trim();
+                                const volumeText = cells[6].textContent.trim();
+                                const changeMatch = changeText.match(/([+-]?\\d+\\.?\\d*)%/);
+                                if (changeMatch) {
+                                    const percentage = parseFloat(changeMatch[1]);
+                                    data.push({
+                                        name: name,
+                                        percentage: percentage,
+                                        changeText: changeText,
+                                        volumeText: volumeText
+                                    });
+                                }
+                            }
+                        }
+                        return data;
+                    }
+                ''')
+                processed_data = []
+                for item in sector_data:
+                    volume = self._parse_volume(item['volumeText'])
+                    net_flow = abs(item['percentage']) * volume if volume else abs(item['percentage'])
+                    processed_data.append({
+                        'sector_name': item['name'],
+                        'percentage': item['percentage'],
+                        'net_flow': net_flow,
+                        'volume': volume,
+                        'flow_direction': 'inflow' if item['percentage'] > 0 else 'outflow',
+                        'timestamp': datetime.now().isoformat()
+                    })
+                await browser.close()
+                return processed_data
+            except Exception as e:
+                print(f"Finviz爬取失败: {e}")
+                await browser.close()
+                return []
+
+    def _parse_volume(self, volume_text: str) -> float:
+        """解析成交量字符串"""
+        try:
+            volume_text = volume_text.strip().replace(',', '').replace('$', '')
+            multiplier = 1
+            if volume_text.endswith('K'):
+                multiplier = 1000
+                volume_text = volume_text[:-1]
+            elif volume_text.endswith('M'):
+                multiplier = 1000000
+                volume_text = volume_text[:-1]
+            elif volume_text.endswith('B'):
+                multiplier = 1000000000
+                volume_text = volume_text[:-1]
+            elif volume_text.endswith('T'):
+                multiplier = 1000000000000
+                volume_text = volume_text[:-1]
+            return float(volume_text) * multiplier
+        except:
+            return 0.0
+
+    def get_top_sectors(self, sector_data: list, top_n: int = 5):
+        """获取资金流入/流出最多的板块"""
+        if not sector_data:
+            return {'top_inflow': [], 'top_outflow': []}
+        inflow_sectors = [s for s in sector_data if s['flow_direction'] == 'inflow']
+        outflow_sectors = [s for s in sector_data if s['flow_direction'] == 'outflow']
+        inflow_sectors.sort(key=lambda x: x['net_flow'], reverse=True)
+        outflow_sectors.sort(key=lambda x: x['net_flow'], reverse=True)
+        return {
+            'top_inflow': inflow_sectors[:top_n],
+            'top_outflow': outflow_sectors[:top_n]
+        }
+
+    def print_results(self, results: dict):
+        """打印结果"""
+        print("=== 美股板块资金流向分析 ===")
+        print(f"数据获取时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print("\n=== 资金流入最多的板块 ===")
+        for i, sector in enumerate(results['top_inflow'], 1):
+            print(f"{i}. {sector['sector_name']}: {sector['net_flow']:.2f} ({sector['percentage']:.2f}%)")
+        print("\n=== 资金流出最多的板块 ===")
+        for i, sector in enumerate(results['top_outflow'], 1):
+            print(f"{i}. {sector['sector_name']}: {sector['net_flow']:.2f} ({sector['percentage']:.2f}%)")
+
+    def save_to_json(self, data: dict, filename: str = None):
+        """保存数据到JSON文件"""
+        if filename is None:
+            filename = f"sector_flows_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        with open(filename, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        print(f"数据已保存到: {filename}")
+
+    def to_dataframe(self, sector_data: list) -> pd.DataFrame:
+        """转换为DataFrame"""
+        return pd.DataFrame(sector_data)
 
 async def scrape_dow_jones(page):
     """爬取道琼斯指数数据"""
@@ -68,6 +343,127 @@ async def scrape_sp500(page):
     except Exception as e:
         logging.error(f"爬取标普500指数时出错: {e}")
         return {'error': str(e)}
+
+
+# ========== Yahoo Finance 板块资金流向爬虫及工具函数 BEGIN ==========
+
+async def scrape_yahoo_sectors(headless: bool = True):
+    """从Yahoo Finance爬取板块资金流向数据"""
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=False)
+        context = await browser.new_context()
+        page = await context.new_page()
+        try:
+            await page.goto('https://finance.yahoo.com/sectors/', wait_until='domcontentloaded')
+            await page.wait_for_timeout(3000)
+            await page.wait_for_selector('[data-testid="sector-table"]', timeout=15000)
+            sector_data = await page.evaluate('''
+                () => {
+                    const rows = document.querySelectorAll('[data-testid="sector-table"] tbody tr');
+                    const data = [];
+                    rows.forEach(row => {
+                        const cells = row.querySelectorAll('td');
+                        if (cells.length >= 4) {
+                            const nameElem = cells[0].querySelector('a');
+                            const changeElem = cells[2];
+                            const volumeElem = cells[3];
+                            if (nameElem && changeElem) {
+                                const name = nameElem.textContent.trim();
+                                const changeText = changeElem.textContent.trim();
+                                const volumeText = volumeElem ? volumeElem.textContent.trim() : '0';
+                                const changeMatch = changeText.match(/([+-]?\\d+\\.?\\d*)%/);
+                                if (changeMatch) {
+                                    const percentage = parseFloat(changeMatch[1]);
+                                    data.push({
+                                        name: name,
+                                        percentage: percentage,
+                                        changeText: changeText,
+                                        volumeText: volumeText
+                                    });
+                                }
+                            }
+                        }
+                    });
+                    return data;
+                }
+            ''')
+            processed_data = []
+            for item in sector_data:
+                volume = _parse_volume(item['volumeText'])
+                net_flow = abs(item['percentage']) * volume if volume else abs(item['percentage'])
+                processed_data.append({
+                    'sector_name': item['name'],
+                    'percentage': item['percentage'],
+                    'net_flow': net_flow,
+                    'volume': volume,
+                    'flow_direction': 'inflow' if item['percentage'] > 0 else 'outflow',
+                    'timestamp': datetime.now().isoformat()
+                })
+            await browser.close()
+            return processed_data
+        except Exception as e:
+            print(f"Yahoo Finance爬取失败: {e}")
+            await browser.close()
+            return []
+
+def _parse_volume(volume_text: str) -> float:
+    """解析成交量字符串"""
+    try:
+        volume_text = volume_text.strip().replace(',', '').replace('$', '')
+        multiplier = 1
+        if volume_text.endswith('K'):
+            multiplier = 1000
+            volume_text = volume_text[:-1]
+        elif volume_text.endswith('M'):
+            multiplier = 1000000
+            volume_text = volume_text[:-1]
+        elif volume_text.endswith('B'):
+            multiplier = 1000000000
+            volume_text = volume_text[:-1]
+        elif volume_text.endswith('T'):
+            multiplier = 1000000000000
+            volume_text = volume_text[:-1]
+        return float(volume_text) * multiplier
+    except:
+        return 0.0
+
+def get_top_sectors(sector_data: list, top_n: int = 5):
+    """获取资金流入/流出最多的板块"""
+    if not sector_data:
+        return {'top_inflow': [], 'top_outflow': []}
+    inflow_sectors = [s for s in sector_data if s['flow_direction'] == 'inflow']
+    outflow_sectors = [s for s in sector_data if s['flow_direction'] == 'outflow']
+    inflow_sectors.sort(key=lambda x: x['net_flow'], reverse=True)
+    outflow_sectors.sort(key=lambda x: x['net_flow'], reverse=True)
+    return {
+        'top_inflow': inflow_sectors[:top_n],
+        'top_outflow': outflow_sectors[:top_n]
+    }
+
+def print_sector_flow_results(results: dict):
+    """打印板块资金流向结果"""
+    print("=== 美股板块资金流向分析 ===")
+    print(f"数据获取时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("\n=== 资金流入最多的板块 ===")
+    for i, sector in enumerate(results['top_inflow'], 1):
+        print(f"{i}. {sector['sector_name']}: {sector['net_flow']:.2f} ({sector['percentage']:.2f}%)")
+    print("\n=== 资金流出最多的板块 ===")
+    for i, sector in enumerate(results['top_outflow'], 1):
+        print(f"{i}. {sector['sector_name']}: {sector['net_flow']:.2f} ({sector['percentage']:.2f}%)")
+
+def save_sector_flow_to_json(data: dict, filename: str = None):
+    """保存板块资金流向数据到JSON文件"""
+    if filename is None:
+        filename = f"sector_flows_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    with open(filename, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    print(f"数据已保存到: {filename}")
+
+def sector_flow_to_dataframe(sector_data: list) -> pd.DataFrame:
+    """转换为DataFrame"""
+    return pd.DataFrame(sector_data)
+
+# ========== Yahoo Finance 板块资金流向爬虫及工具函数 END ==========
 
 
 async def get_daily_market_sectors():
@@ -349,6 +745,53 @@ async def scrape_financial_data(debug=False):
             results["US_TOP_GAINERS"] = {"error": str(e)}
         
         logging.info("Yahoo Finance爬取完成")
+
+        # 集成新版 Yahoo Finance 板块资金流向（多源）
+        logging.info("正在从 Yahoo Finance/MarketWatch/Finviz 爬取板块资金流向数据（新版）...")
+        try:
+            sector_scraper = SimpleSectorFlowScraper(headless=True)
+            all_data = []
+            data_sources = [
+                ("Yahoo Finance", sector_scraper.scrape_yahoo_sectors),
+                ("MarketWatch", sector_scraper.scrape_marketwatch_sectors),
+                ("Finviz", sector_scraper.scrape_finviz_sectors)
+            ]
+            for source_name, scrape_func in data_sources:
+                logging.info(f"开始爬取{source_name}板块数据...")
+                try:
+                    data = await scrape_func()
+                    if data:
+                        logging.info(f"成功获取{source_name}板块数据: {len(data)}条")
+                        all_data.extend(data)
+                    else:
+                        logging.warning(f"{source_name}未获取到数据")
+                except Exception as e:
+                    logging.error(f"{source_name}爬取出错: {e}")
+            if all_data:
+                # 去重处理（基于板块名称）
+                unique_sectors = {}
+                for item in all_data:
+                    sector_name = item['sector_name']
+                    if sector_name not in unique_sectors:
+                        unique_sectors[sector_name] = item
+                    else:
+                        existing = unique_sectors[sector_name]
+                        if item['volume'] > existing['volume']:
+                            unique_sectors[sector_name] = item
+                final_data = list(unique_sectors.values())
+                top_sectors = sector_scraper.get_top_sectors(final_data)
+                results["yahoo_sector_money_flow"] = {
+                    "raw_data": final_data,
+                    "analysis": top_sectors,
+                    "data_sources_used": len([d for d in data_sources if d[1] in [sector_scraper.scrape_yahoo_sectors, sector_scraper.scrape_marketwatch_sectors, sector_scraper.scrape_finviz_sectors]])
+                }
+                logging.info(f"成功获取美股板块资金流向（多源）: {len(final_data)}条")
+            else:
+                results["yahoo_sector_money_flow"] = {"error": "未能获取到任何板块资金流向数据"}
+        except Exception as e:
+            logging.error(f"爬取美股板块资金流向失败: {e}")
+            results["yahoo_sector_money_flow"] = {"error": str(e)}
+
         logging.info("正在爬取美股三大指数")
         results["道琼斯指数数据"] = await scrape_dow_jones(page)
         results["纳斯达克指数数据"] = await scrape_nasdaq(page)
@@ -584,8 +1027,167 @@ async def main():
         print("\n--- 主流加密货币实时表现 ---")
         print(pd.DataFrame(scraped_data["CRYPTOCURRENCY_DATA"]).to_string(index=False))
 
+# ===== 东方财富板块资金流向API爬虫类（来自 volume.py） =====
+import time
+
+class StockSectorCrawler:
+    def __init__(self):
+        self.base_url = "http://push2.eastmoney.com/api/qt/clist/get"
+        self.headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Referer': 'http://quote.eastmoney.com/',
+            'Accept': 'application/json, text/javascript, */*; q=0.01',
+            'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+            'Connection': 'keep-alive'
+        }
+        
+    async def get_sector_data(self, page):
+        try:
+            params = {
+                'cb': 'jQuery112404953340710317346_1640000000000',
+                'pn': '1',
+                'pz': '500',
+                'po': '1',
+                'np': '1',
+                'ut': 'bd1d9ddb04089700cf9c27f6f7426281',
+                'fltt': '2',
+                'invt': '2',
+                'wbp2u': '|0|0|0|web',
+                'fid': 'f62',
+                'fs': 'm:90 t:2',
+                'fields': 'f12,f14,f2,f3,f62,f184,f66,f69,f72,f75,f78,f81,f84,f87,f204,f205,f124'
+            }
+            url = f"{self.base_url}?"
+            for key, value in params.items():
+                url += f"{key}={value}&"
+            url = url.rstrip('&')
+            response = await page.goto(url, wait_until='networkidle')
+            content = await page.content()
+            if 'jQuery' in content:
+                start_idx = content.find('(') + 1
+                end_idx = content.rfind(')')
+                json_str = content[start_idx:end_idx]
+                data = json.loads(json_str)
+                return data.get('data', {}).get('diff', [])
+            else:
+                return []
+        except Exception as e:
+            print(f"获取数据失败: {e}")
+            return []
+
+    async def parse_sector_data(self, raw_data):
+        sectors = []
+        for item in raw_data:
+            try:
+                sector_info = {
+                    'code': item.get('f12', ''),
+                    'name': item.get('f14', ''),
+                    'price': item.get('f2', 0),
+                    'change_pct': item.get('f3', 0),
+                    'main_net_inflow': item.get('f62', 0),
+                    'main_net_inflow_pct': item.get('f184', 0),
+                    'super_large_net_inflow': item.get('f66', 0),
+                    'large_net_inflow': item.get('f69', 0),
+                    'medium_net_inflow': item.get('f72', 0),
+                    'small_net_inflow': item.get('f75', 0),
+                    'super_large_inflow': item.get('f78', 0),
+                    'super_large_outflow': item.get('f79', 0),
+                    'large_inflow': item.get('f81', 0),
+                    'large_outflow': item.get('f82', 0),
+                    'medium_inflow': item.get('f84', 0),
+                    'medium_outflow': item.get('f85', 0),
+                    'small_inflow': item.get('f87', 0),
+                    'small_outflow': item.get('f88', 0),
+                    'total_turnover': item.get('f124', 0),
+                }
+                money_fields = ['main_net_inflow', 'super_large_net_inflow', 'large_net_inflow',
+                                'medium_net_inflow', 'small_net_inflow', 'super_large_inflow',
+                                'super_large_outflow', 'large_inflow', 'large_outflow',
+                                'medium_inflow', 'medium_outflow', 'small_inflow', 'small_outflow']
+                for field in money_fields:
+                    if sector_info[field]:
+                        sector_info[field] = sector_info[field] / 10000
+                sectors.append(sector_info)
+            except Exception as e:
+                continue
+        return sectors
+
+    def analyze_sectors(self, sectors):
+        if not sectors:
+            return None
+        df = pd.DataFrame(sectors)
+        df_sorted = df.sort_values('main_net_inflow', ascending=False)
+        max_inflow_sector = df_sorted.iloc[0]
+        max_outflow_sector = df_sorted.iloc[-1]
+        result = {
+            'max_inflow': {
+                'name': max_inflow_sector['name'],
+                'code': max_inflow_sector['code'],
+                'net_inflow': max_inflow_sector['main_net_inflow'],
+                'change_pct': max_inflow_sector['change_pct'],
+                'price': max_inflow_sector['price']
+            },
+            'max_outflow': {
+                'name': max_outflow_sector['name'],
+                'code': max_outflow_sector['code'],
+                'net_outflow': abs(max_outflow_sector['main_net_inflow']),
+                'change_pct': max_outflow_sector['change_pct'],
+                'price': max_outflow_sector['price']
+            },
+            'total_sectors': len(sectors),
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        }
+        return result
+
+    async def crawl_sector_money_flow(self, playwright=None):
+        # playwright参数可复用外部实例
+        close_browser = False
+        if playwright is None:
+            playwright = await async_playwright().start()
+            close_browser = True
+        browser = await playwright.chromium.launch(headless=True, args=['--no-sandbox', '--disable-dev-shm-usage'])
+        try:
+            page = await browser.new_page()
+            await page.set_extra_http_headers(self.headers)
+            await page.set_viewport_size({"width": 1920, "height": 1080})
+            raw_data = await self.get_sector_data(page)
+            if not raw_data:
+                return None
+            sectors = await self.parse_sector_data(raw_data)
+            if not sectors:
+                return None
+            analysis_result = self.analyze_sectors(sectors)
+            return analysis_result, sectors
+        except Exception as e:
+            print(f"爬取过程中发生错误: {e}")
+            return None
+        finally:
+            await browser.close()
+            if close_browser:
+                await playwright.stop()
+
+# ========== 修改 scrape_financial_data，集成东方财富API板块资金流向 ==========
+# 在东方财富网部分最后添加如下调用
+# ...
+#         # 2.4 东方财富API板块资金流向
+        try:
+            logging.info("正在通过API爬取东方财富板块资金流向...")
+            sector_crawler = StockSectorCrawler()
+            # 复用playwright实例，避免重复启动
+            result = await sector_crawler.crawl_sector_money_flow(playwright=p)
+            if result:
+                analysis, all_sectors = result
+                results["eastmoney_sector_money_flow"] = {
+                    "analysis": analysis,
+                    "all_sectors": all_sectors
+                }
+                logging.info(f"成功获取东方财富API板块资金流向: {analysis}")
+            else:
+                results["eastmoney_sector_money_flow"] = {"error": "API未获取到数据"}
+        except Exception as e:
+            logging.error(f"东方财富API板块资金流向爬取失败: {e}")
+
 if __name__ == "__main__":
-    # 在 Windows 上运行时，设置此策略以避免事件循环错误
     # 在 Windows 上运行时，设置此策略以避免事件循环错误
     if sys.platform == "win32":
         import nest_asyncio
