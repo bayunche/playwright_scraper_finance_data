@@ -97,7 +97,7 @@ class SimpleSectorFlowScraper:
             page = await context.new_page()
             try:
                 print("正在访问MarketWatch板块页面...")
-                await page.goto('https://www.marketwatch.com/investing/sectors', wait_until='networkidle')
+                await page.goto('https://www.marketwatch.com/investing/sectors', wait_until='domcontentloaded')
                 await page.wait_for_timeout(3000)
                 # 由于页面可能被验证码拦截或结构变化，以下选择器可能无效
                 # 增加异常处理和提示
@@ -181,7 +181,7 @@ class SimpleSectorFlowScraper:
             context = await browser.new_context()
             page = await context.new_page()
             try:
-                await page.goto('https://finviz.com/groups.ashx?g=sector&v=210&o=name', wait_until='networkidle')
+                await page.goto('https://finviz.com/groups.ashx?g=sector&v=210&o=name', wait_until='domcontentloaded')
                 await page.wait_for_timeout(3000)
                 await page.wait_for_selector('.groups-table', timeout=15000)
                 sector_data = await page.evaluate('''
@@ -846,7 +846,7 @@ async def scrape_financial_data(debug=False):
                 await page.goto(url, timeout=60000)
                 await remove_eastmoney_mask(page)
                 await page.set_extra_http_headers(eastmoney_headers)
-                # await page.wait_for_load_state('networkidle')  # 等待页面加载完成
+                # await page.wait_for_load_state('domcontentloaded')  # 等待页面加载完成
                 await asyncio.sleep(3)  # 等待额外的时间以确保数据加载
                 # 等待价格和涨跌幅数据加载
                 await page.wait_for_selector('.zxj, .zd', timeout=10000)
@@ -935,7 +935,7 @@ async def scrape_financial_data(debug=False):
             await remove_eastmoney_mask(page)
             
             # 等待页面加载完成
-            # await page.wait_for_load_state('networkidle')
+            # await page.wait_for_load_state('domcontentloaded')
             await asyncio.sleep(4)  # 额外等待以确保数据加载
             
             # 等待北向资金数据加载
@@ -1061,7 +1061,7 @@ class StockSectorCrawler:
             for key, value in params.items():
                 url += f"{key}={value}&"
             url = url.rstrip('&')
-            response = await page.goto(url, wait_until='networkidle')
+            response = await page.goto(url, wait_until='domcontentloaded')
             content = await page.content()
             if 'jQuery' in content:
                 start_idx = content.find('(') + 1

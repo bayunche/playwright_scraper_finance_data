@@ -9,3 +9,13 @@ playwright-stealth
 lxml
 aiohttp
 pandas
+whisper-timestamped
+python-multipart
+pydantic
+whisperx
+forcealign
+librosa
+soundfile
+numpy
+pydub
+jieba

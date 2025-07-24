@@ -1,5 +1,5 @@
 /.roo
 /.venv
 /__pycache__
-
+/models
 /user_data
