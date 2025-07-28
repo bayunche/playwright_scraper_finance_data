@@ -1,5 +1,6 @@
 import sys
 from fastapi import FastAPI, Query, UploadFile, File
+from fastapi.staticfiles import StaticFiles
 from dateutil import parser as date_parser
 from datetime import datetime
 import asyncio
@@ -16,6 +17,7 @@ from pydantic import BaseModel
 from typing import List, Tuple, Dict, Optional
 import aiohttp
 import os
+import uuid
 import librosa
 import soundfile as sf
 import numpy as np
@@ -35,6 +37,9 @@ if sys.platform == "win32":
 
 app = FastAPI()
 
+# 挂载静态文件服务用于视频下载
+app.mount("/videos", StaticFiles(directory="generated_videos"), name="videos")
+
 class DialogueUnit(BaseModel):
     text: str
     model_name: str
@@ -46,6 +51,17 @@ class AlignRequest(BaseModel):
     audio_url: str
     transcript: Optional[List[DialogueUnit]] = None
     transcript_text: Optional[str] = None
+
+class VideoGenerationRequest(BaseModel):
+    html_content: str
+    audio_url: str
+
+class VideoGenerationResponse(BaseModel):
+    success: bool
+    video_url: Optional[str] = None
+    error: Optional[str] = None
+    duration: Optional[float] = None
+    file_size: Optional[int] = None
 # 改进的对齐算法类
 class ImprovedAlignment:
     def __init__(self):
@@ -641,3 +657,198 @@ async def scrape(time: str = Query(..., description="时间参数，例如2025-0
 
     data = await scrape_financial_data()
     return {"time": parsed_time.isoformat(), "data": data}
+
+async def download_audio_and_get_duration(audio_url: str) -> Tuple[bytes, float]:
+    """下载音频并获取时长"""
+    async with aiohttp.ClientSession() as session:
+        async with session.get(audio_url) as response:
+            if response.status != 200:
+                raise Exception(f"音频下载失败，HTTP状态码: {response.status}")
+            
+            audio_data = await response.read()
+            
+    # 使用librosa获取音频时长
+    with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as temp_file:
+        temp_file.write(audio_data)
+        temp_path = temp_file.name
+    
+    try:
+        # 加载音频获取时长
+        audio, sr = librosa.load(temp_path, sr=None)
+        duration = len(audio) / sr
+        return audio_data, duration
+    finally:
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
+
+def save_html_file(html_content: str) -> str:
+    """保存HTML内容到临时文件"""
+    if not html_content or not html_content.strip():
+        raise ValueError("HTML内容不能为空")
+    
+    # 生成唯一文件名
+    unique_id = str(uuid.uuid4())[:8]
+    filename = f"temp_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{unique_id}.html"
+    file_path = os.path.join("temp_html", filename)
+    
+    # 确保目录存在
+    os.makedirs("temp_html", exist_ok=True)
+    
+    # 保存HTML文件
+    try:
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write(html_content)
+        print(f"HTML文件保存成功: {file_path}")
+        return file_path
+    except Exception as e:
+        raise Exception(f"保存HTML文件失败: {str(e)}")
+
+async def record_html_video(html_path: str, duration: float) -> str:
+    """使用Playwright录制HTML页面视频"""
+    from playwright.async_api import async_playwright
+    
+    if not os.path.exists(html_path):
+        raise FileNotFoundError(f"HTML文件不存在: {html_path}")
+    
+    if duration <= 0:
+        raise ValueError("音频时长必须大于0")
+    
+    # 生成视频文件名  
+    unique_id = str(uuid.uuid4())[:8]
+    video_filename = f"video_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{unique_id}.webm"
+    video_path = os.path.join("generated_videos", video_filename)
+    
+    # 确保目录存在
+    os.makedirs("generated_videos", exist_ok=True)
+    
+    browser = None
+    context = None
+    
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                headless=True,
+                args=['--no-sandbox', '--disable-dev-shm-usage']
+            )
+            
+            context = await browser.new_context(
+                viewport={'width': 1920, 'height': 1080},
+                record_video_dir="generated_videos",
+                record_video_size={'width': 1920, 'height': 1080}
+            )
+            
+            page = await context.new_page()
+            
+            # 获取绝对路径并转换为file URL
+            abs_html_path = os.path.abspath(html_path)
+            file_url = f"file:///{abs_html_path.replace(os.sep, '/')}"
+            print(f"正在打开HTML页面: {file_url}")
+            
+            # 打开HTML页面
+            await page.goto(file_url, wait_until='domcontentloaded', timeout=30000)
+            
+            # 等待页面完全加载
+            await page.wait_for_timeout(2000)
+            
+            # 录制指定时长（加1秒缓冲）
+            record_duration = int((duration + 1) * 1000)
+            print(f"开始录制视频，时长: {record_duration/1000:.1f}秒")
+            await page.wait_for_timeout(record_duration)
+            
+            # 关闭context以保存视频
+            await context.close()
+            await browser.close()
+            
+            # 等待视频文件生成
+            await asyncio.sleep(2)
+            
+        # 查找生成的视频文件
+        video_files = []
+        if os.path.exists("generated_videos"):
+            video_files = [f for f in os.listdir("generated_videos") 
+                          if f.endswith('.webm') and f != video_filename]
+        
+        if video_files:
+            # 获取最新的视频文件
+            latest_video = max([os.path.join("generated_videos", f) for f in video_files], 
+                              key=os.path.getctime)
+            
+            # 重命名为目标文件名
+            if os.path.exists(latest_video):
+                os.rename(latest_video, video_path)
+                print(f"视频录制成功: {video_path}")
+                return video_path
+        
+        raise Exception("视频录制失败，未生成视频文件")
+        
+    except Exception as e:
+        print(f"录屏过程中发生错误: {str(e)}")
+        # 清理可能生成的临时文件
+        if os.path.exists(video_path):
+            try:
+                os.unlink(video_path)
+            except:
+                pass
+        raise Exception(f"视频录制失败: {str(e)}")
+    
+    finally:
+        # 确保浏览器资源被正确释放
+        try:
+            if context:
+                await context.close()
+            if browser:
+                await browser.close()
+        except:
+            pass
+
+@app.post("/generate-video", response_model=VideoGenerationResponse)
+async def generate_video(request: VideoGenerationRequest):
+    """生成HTML+音频的视频"""
+    temp_files = []
+    
+    try:
+        # 1. 下载音频并获取时长
+        print("正在下载音频并获取时长...")
+        audio_data, duration = await download_audio_and_get_duration(request.audio_url)
+        print(f"音频时长: {duration:.2f}秒")
+        
+        # 2. 保存HTML文件
+        print("正在保存HTML文件...")
+        html_path = save_html_file(request.html_content)
+        temp_files.append(html_path)
+        print(f"HTML文件已保存: {html_path}")
+        
+        # 3. 录制视频
+        print("正在录制视频...")
+        video_path = await record_html_video(html_path, duration)
+        temp_files.append(video_path)
+        print(f"视频录制完成: {video_path}")
+        
+        # 4. 获取视频文件信息
+        file_size = os.path.getsize(video_path)
+        video_filename = os.path.basename(video_path)
+        video_url = f"/videos/{video_filename}"
+        
+        return VideoGenerationResponse(
+            success=True,
+            video_url=video_url,
+            duration=duration,
+            file_size=file_size
+        )
+        
+    except Exception as e:
+        print(f"视频生成失败: {str(e)}")
+        return VideoGenerationResponse(
+            success=False,
+            error=str(e)
+        )
+    
+    finally:
+        # 清理HTML临时文件（保留视频文件）
+        for temp_file in temp_files:
+            if temp_file.endswith('.html') and os.path.exists(temp_file):
+                try:
+                    os.unlink(temp_file)
+                    print(f"已清理临时文件: {temp_file}")
+                except Exception as e:
+                    print(f"清理临时文件失败: {e}")

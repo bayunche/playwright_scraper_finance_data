@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>测试HTML页面</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background: linear-gradient(45deg, #667eea 0%, #764ba2 100%);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            color: white;
+        }
+        .container {
+            text-align: center;
+            background: rgba(255, 255, 255, 0.1);
+            padding: 50px;
+            border-radius: 20px;
+            backdrop-filter: blur(10px);
+            box-shadow: 0 8px 32px rgba(31, 38, 135, 0.37);
+        }
+        h1 {
+            font-size: 3em;
+            margin-bottom: 20px;
+            animation: fadeInUp 1s ease-out;
+        }
+        p {
+            font-size: 1.5em;
+            margin-bottom: 30px;
+            animation: fadeInUp 1s ease-out 0.5s both;
+        }
+        .time {
+            font-size: 2em;
+            color: #FFD700;
+            animation: pulse 2s infinite;
+        }
+        @keyframes fadeInUp {
+            from {
+                opacity: 0;
+                transform: translateY(30px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.7; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>视频录制测试</h1>
+        <p>这是一个用于测试HTML+音频录屏功能的页面</p>
+        <div class="time" id="clock"></div>
+    </div>
+
+    <script>
+        function updateClock() {
+            const now = new Date();
+            const timeString = now.toLocaleTimeString('zh-CN');
+            document.getElementById('clock').textContent = timeString;
+        }
+        
+        updateClock();
+        setInterval(updateClock, 1000);
+    </script>
+</body>
+</html>
