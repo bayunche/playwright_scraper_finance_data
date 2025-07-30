@@ -21,3 +21,4 @@ pydub
 jieba
 pymysql
 sqlalchemy
+python-dotenv

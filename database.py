@@ -412,6 +412,10 @@ class DatabaseManager:
 
 # 全局数据库管理器实例（使用环境变量配置）
 import os
+from dotenv import load_dotenv
+
+# 加载.env文件
+load_dotenv()
 
 def get_database_manager():
     """获取数据库管理器实例"""
