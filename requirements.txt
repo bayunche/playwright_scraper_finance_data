@@ -19,3 +19,5 @@ soundfile
 numpy
 pydub
 jieba
+pymysql
+sqlalchemy

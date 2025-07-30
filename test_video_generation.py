@@ -27,7 +27,8 @@ async def test_video_generation():
     # 准备请求数据
     request_data = {
         "html_content": html_content,
-        "audio_url": audio_url
+        "audio_url": audio_url,
+        "play_button_selector": "#playButton"  # 指定自定义播放按钮选择器
     }
     
     print("开始测试视频生成功能...")

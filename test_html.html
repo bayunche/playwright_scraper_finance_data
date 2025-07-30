@@ -38,6 +38,28 @@
             color: #FFD700;
             animation: pulse 2s infinite;
         }
+        .play-button {
+            background: linear-gradient(45deg, #FF6B6B, #4ECDC4);
+            border: none;
+            color: white;
+            padding: 15px 30px;
+            font-size: 1.2em;
+            border-radius: 50px;
+            cursor: pointer;
+            margin: 20px;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+        }
+        .play-button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(0,0,0,0.3);
+        }
+        .play-button:active {
+            transform: translateY(0);
+        }
+        .hidden {
+            display: none;
+        }
         @keyframes fadeInUp {
             from {
                 opacity: 0;
@@ -58,18 +80,41 @@
     <div class="container">
         <h1>视频录制测试</h1>
         <p>这是一个用于测试HTML+音频录屏功能的页面</p>
-        <div class="time" id="clock"></div>
+        <button class="play-button" id="playButton" onclick="startAnimation()">▶ 开始播放</button>
+        <div class="time hidden" id="clock"></div>
+        <div id="status" style="margin-top: 20px; font-size: 1.2em;">点击播放按钮开始演示</div>
     </div>
 
     <script>
+        let clockInterval;
+        
         function updateClock() {
             const now = new Date();
             const timeString = now.toLocaleTimeString('zh-CN');
             document.getElementById('clock').textContent = timeString;
         }
         
-        updateClock();
-        setInterval(updateClock, 1000);
+        function startAnimation() {
+            // 隐藏播放按钮
+            document.getElementById('playButton').style.display = 'none';
+            
+            // 显示时钟
+            document.getElementById('clock').classList.remove('hidden');
+            
+            // 更新状态
+            document.getElementById('status').textContent = '正在播放演示...';
+            
+            // 开始时钟更新
+            updateClock();
+            clockInterval = setInterval(updateClock, 1000);
+            
+            // 添加一些动态效果
+            setTimeout(() => {
+                document.getElementById('status').textContent = '录制中... 🔴';
+            }, 2000);
+        }
+        
+        // 页面加载时不自动开始，等待播放按钮点击
     </script>
 </body>
 </html>

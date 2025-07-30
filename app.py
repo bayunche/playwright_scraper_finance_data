@@ -55,6 +55,7 @@ class AlignRequest(BaseModel):
 class VideoGenerationRequest(BaseModel):
     html_content: str
     audio_url: str
+    play_button_selector: Optional[str] = None  # 可选的自定义播放按钮选择器
 
 class VideoGenerationResponse(BaseModel):
     success: bool
@@ -655,8 +656,95 @@ async def scrape(time: str = Query(..., description="时间参数，例如2025-0
     except Exception:
         parsed_time = datetime.now()
 
+    # 记录爬取开始时间
+    scrape_start_time = datetime.now()
+    
+    # 执行数据爬取
     data = await scrape_financial_data()
-    return {"time": parsed_time.isoformat(), "data": data}
+    
+    # 保存数据到MySQL数据库
+    try:
+        from database import get_database_manager
+        db_manager = get_database_manager()
+        
+        # 测试数据库连接
+        if db_manager.test_connection():
+            record_id = db_manager.save_scrape_data(
+                scrape_time=scrape_start_time,
+                request_time=time,
+                data=data
+            )
+            
+            if record_id:
+                print(f"数据已保存到数据库，记录ID: {record_id}")
+                # 在返回数据中添加数据库记录信息
+                return {
+                    "time": parsed_time.isoformat(),
+                    "data": data,
+                    "database": {
+                        "saved": True,
+                        "record_id": record_id,
+                        "save_time": scrape_start_time.isoformat()
+                    }
+                }
+            else:
+                print("数据保存到数据库失败")
+                return {
+                    "time": parsed_time.isoformat(),
+                    "data": data,
+                    "database": {
+                        "saved": False,
+                        "error": "数据保存失败"
+                    }
+                }
+        else:
+            print("数据库连接失败，跳过数据保存")
+            return {
+                "time": parsed_time.isoformat(),
+                "data": data,
+                "database": {
+                    "saved": False,
+                    "error": "数据库连接失败"
+                }
+            }
+    except Exception as db_error:
+        print(f"数据库操作异常: {db_error}")
+        # 即使数据库保存失败，也要返回爬取的数据
+        return {
+            "time": parsed_time.isoformat(),
+            "data": data,
+            "database": {
+                "saved": False,
+                "error": str(db_error)
+            }
+        }
+
+@app.get("/scrape/history")
+async def get_scrape_history(limit: int = Query(10, description="返回记录数量，默认10条")):
+    """获取最近的爬取记录历史"""
+    try:
+        from database import get_database_manager
+        db_manager = get_database_manager()
+        
+        if db_manager.test_connection():
+            records = db_manager.get_recent_records(limit=limit)
+            return {
+                "success": True,
+                "records": records,
+                "count": len(records)
+            }
+        else:
+            return {
+                "success": False,
+                "error": "数据库连接失败",
+                "records": []
+            }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "records": []
+        }
 
 async def download_audio_and_get_duration(audio_url: str) -> Tuple[bytes, float]:
     """下载音频并获取时长"""
@@ -703,7 +791,7 @@ def save_html_file(html_content: str) -> str:
     except Exception as e:
         raise Exception(f"保存HTML文件失败: {str(e)}")
 
-async def record_html_video(html_path: str, duration: float) -> str:
+async def record_html_video(html_path: str, duration: float, play_button_selector: Optional[str] = None) -> str:
     """使用Playwright录制HTML页面视频"""
     from playwright.async_api import async_playwright
     
@@ -749,6 +837,85 @@ async def record_html_video(html_path: str, duration: float) -> str:
             
             # 等待页面完全加载
             await page.wait_for_timeout(2000)
+            
+            # 查找并点击播放按钮
+            print("正在查找播放按钮...")
+            play_button_found = False
+            
+            # 如果用户提供了自定义选择器，优先使用
+            if play_button_selector:
+                play_selectors = [play_button_selector]
+                print(f"使用自定义播放按钮选择器: {play_button_selector}")
+            else:
+                # 常见的播放按钮选择器
+                play_selectors = [
+                    'button[id*="play"]',
+                    'button[class*="play"]',
+                    'button[aria-label*="play"]',
+                    'button[aria-label*="播放"]',
+                    '.play-button',
+                    '.play-btn',
+                    '#playButton',
+                    '#play-button',
+                    'button:has-text("播放")',
+                    'button:has-text("Play")',
+                    'button:has-text("▶")',
+                    '[role="button"]:has-text("播放")',
+                    '[role="button"]:has-text("Play")',
+                    # 音频和视频元素的播放控制
+                    'audio',
+                    'video'
+                ]
+            
+            for selector in play_selectors:
+                try:
+                    # 等待元素出现（最多2秒）
+                    element = await page.wait_for_selector(selector, timeout=2000)
+                    if element:
+                        print(f"找到播放元素: {selector}")
+                        
+                        # 检查是否是audio/video元素
+                        if selector in ['audio', 'video']:
+                            # 对于audio/video元素，调用play()方法
+                            await page.evaluate(f'document.querySelector("{selector}").play()')
+                            print(f"已调用 {selector} 元素的 play() 方法")
+                        else:
+                            # 对于按钮元素，直接点击
+                            await element.click()
+                            print(f"已点击播放按钮: {selector}")
+                        
+                        play_button_found = True
+                        break
+                except:
+                    continue
+            
+            if not play_button_found:
+                print("未找到播放按钮，尝试其他交互方式...")
+                # 尝试多种交互方式来触发播放
+                interaction_methods = [
+                    # 点击页面中心
+                    lambda: page.click('body'),
+                    # 按空格键（常见的播放快捷键）
+                    lambda: page.keyboard.press('Space'),
+                    # 按回车键
+                    lambda: page.keyboard.press('Enter'),
+                    # 点击页面任意可点击元素
+                    lambda: page.click('*'),
+                ]
+                
+                for i, method in enumerate(interaction_methods):
+                    try:
+                        await method()
+                        print(f"已尝试交互方式 {i+1}")
+                        await page.wait_for_timeout(500)  # 短暂等待
+                        break
+                    except:
+                        continue
+                else:
+                    print("所有交互方式都失败，直接开始录制...")
+            
+            # 等待播放开始（给一些缓冲时间）
+            await page.wait_for_timeout(1000)
             
             # 录制指定时长（加1秒缓冲）
             record_duration = int((duration + 1) * 1000)
@@ -820,7 +987,7 @@ async def generate_video(request: VideoGenerationRequest):
         
         # 3. 录制视频
         print("正在录制视频...")
-        video_path = await record_html_video(html_path, duration)
+        video_path = await record_html_video(html_path, duration, request.play_button_selector)
         temp_files.append(video_path)
         print(f"视频录制完成: {video_path}")
         
