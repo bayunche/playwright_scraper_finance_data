@@ -4,7 +4,8 @@
       "Bash(ls:*)",
       "Bash(mkdir:*)",
       "Bash(python:*)",
-      "Bash(pip install:*)"
+      "Bash(pip install:*)",
+      "WebFetch(domain:playwright.dev)"
     ],
     "deny": []
   }

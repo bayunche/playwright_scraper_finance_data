@@ -792,7 +792,7 @@ def save_html_file(html_content: str) -> str:
         raise Exception(f"保存HTML文件失败: {str(e)}")
 
 async def record_html_video(html_path: str, duration: float, play_button_selector: Optional[str] = None) -> str:
-    """使用Playwright录制HTML页面视频"""
+    """使用Playwright录制HTML页面视频（仅视频，不含音频）"""
     from playwright.async_api import async_playwright
     
     if not os.path.exists(html_path):
@@ -816,7 +816,12 @@ async def record_html_video(html_path: str, duration: float, play_button_selecto
         async with async_playwright() as p:
             browser = await p.chromium.launch(
                 headless=True,
-                args=['--no-sandbox', '--disable-dev-shm-usage']
+                args=[
+                    '--no-sandbox', 
+                    '--disable-dev-shm-usage',
+                    '--autoplay-policy=no-user-gesture-required',  # 允许自动播放音频
+                    '--disable-web-security',  # 禁用web安全限制（仅测试用）
+                ]
             )
             
             context = await browser.new_context(
@@ -970,7 +975,7 @@ async def record_html_video(html_path: str, duration: float, play_button_selecto
 
 @app.post("/generate-video", response_model=VideoGenerationResponse)
 async def generate_video(request: VideoGenerationRequest):
-    """生成HTML+音频的视频"""
+    """生成HTML+音频的视频（仅视频，不含音频）"""
     temp_files = []
     
     try:
@@ -985,8 +990,8 @@ async def generate_video(request: VideoGenerationRequest):
         temp_files.append(html_path)
         print(f"HTML文件已保存: {html_path}")
         
-        # 3. 录制视频
-        print("正在录制视频...")
+        # 3. 录制视频（仅视频，无音频）
+        print("正在录制视频（静音）...")
         video_path = await record_html_video(html_path, duration, request.play_button_selector)
         temp_files.append(video_path)
         print(f"视频录制完成: {video_path}")
@@ -1005,6 +1010,66 @@ async def generate_video(request: VideoGenerationRequest):
         
     except Exception as e:
         print(f"视频生成失败: {str(e)}")
+        return VideoGenerationResponse(
+            success=False,
+            error=str(e)
+        )
+    
+    finally:
+        # 清理HTML临时文件（保留视频文件）
+        for temp_file in temp_files:
+            if temp_file.endswith('.html') and os.path.exists(temp_file):
+                try:
+                    os.unlink(temp_file)
+                    print(f"已清理临时文件: {temp_file}")
+                except Exception as e:
+                    print(f"清理临时文件失败: {e}")
+
+@app.post("/generate-video-with-audio", response_model=VideoGenerationResponse)
+async def generate_video_with_audio(request: VideoGenerationRequest):
+    """生成带音频的HTML视频（需要FFmpeg支持）"""
+    from video_with_audio_solution import VideoAudioRecorder
+    
+    temp_files = []
+    recorder = VideoAudioRecorder()
+    
+    try:
+        # 1. 保存HTML文件
+        print("正在保存HTML文件...")
+        html_path = save_html_file(request.html_content)
+        temp_files.append(html_path)
+        print(f"HTML文件已保存: {html_path}")
+        
+        # 2. 获取音频时长
+        print("正在获取音频时长...")
+        audio_data, duration = await download_audio_and_get_duration(request.audio_url)
+        print(f"音频时长: {duration:.2f}秒")
+        
+        # 3. 录制带音频的视频
+        print("正在录制带音频的视频...")
+        final_video_path = await recorder.record_html_with_audio(
+            html_path=html_path,
+            audio_url=request.audio_url,
+            duration=duration,
+            play_button_selector=request.play_button_selector
+        )
+        
+        print(f"带音频视频生成完成: {final_video_path}")
+        
+        # 4. 获取视频文件信息
+        file_size = os.path.getsize(final_video_path)
+        video_filename = os.path.basename(final_video_path)
+        video_url = f"/videos/{video_filename}"
+        
+        return VideoGenerationResponse(
+            success=True,
+            video_url=video_url,
+            duration=duration,
+            file_size=file_size
+        )
+        
+    except Exception as e:
+        print(f"带音频视频生成失败: {str(e)}")
         return VideoGenerationResponse(
             success=False,
             error=str(e)

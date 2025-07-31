@@ -154,6 +154,12 @@ class DatabaseManager:
         if not value:
             return default
         try:
+            # 先尝试提取百分比数字
+            if '%' in str(value):
+                percent_match = re.search(r'([+-]?\d+\.?\d*)%', str(value))
+                if percent_match:
+                    return Decimal(percent_match.group(1))
+            
             # 移除非数字字符（保留小数点和负号）
             clean_value = re.sub(r'[^\d.-]', '', str(value))
             if clean_value:
@@ -227,9 +233,18 @@ class DatabaseManager:
     
     def _save_us_gainers_data(self, session, record_id: int, data: Dict[str, Any]):
         """保存美股涨幅榜数据"""
-        if 'US_stock_gainers' in data:
-            gainers_data = data['US_stock_gainers']
-            
+        # 支持多种可能的key名称
+        possible_keys = ['US_stock_gainers', '美股涨幅前五', 'us_gainers']
+        gainers_data = None
+        used_key = None
+        
+        for key in possible_keys:
+            if key in data:
+                gainers_data = data[key]
+                used_key = key
+                break
+        
+        if gainers_data is not None:
             if self._is_error_data(gainers_data):
                 # 保存错误信息
                 insert_sql = text("""
@@ -239,10 +254,42 @@ class DatabaseManager:
                 """)
                 session.execute(insert_sql, {
                     'record_id': record_id,
-                    'error_msg': gainers_data.get('error', '')
+                    'error_msg': gainers_data.get('error', '') if isinstance(gainers_data, dict) else str(gainers_data)
                 })
-            else:
-                # 保存股票数据
+            elif isinstance(gainers_data, list):
+                # 处理list格式的美股数据
+                for i, stock_item in enumerate(gainers_data, 1):
+                    if isinstance(stock_item, dict):
+                        insert_sql = text("""
+                            INSERT INTO us_stock_gainers 
+                            (record_id, stock_symbol, stock_name, current_price, 
+                             price_change, change_percent, volume, ranking_position, is_error)
+                            VALUES (:record_id, :symbol, :name, :price, 
+                                    :price_change, :change_percent, :volume, :ranking, FALSE)
+                        """)
+                        
+                        # 处理中文key映射 - 按字段位置直接匹配
+                        keys = list(stock_item.keys())
+                        
+                        symbol = stock_item.get(keys[1], '') if len(keys) > 1 else ''  # 股票代码
+                        name = stock_item.get(keys[2], '') if len(keys) > 2 else ''    # 股票名称  
+                        price = stock_item.get(keys[3], '') if len(keys) > 3 else ''   # 价格
+                        change = stock_item.get(keys[4], '') if len(keys) > 4 else ''  # 涨跌（点）
+                        change_percent = stock_item.get(keys[5], '') if len(keys) > 5 else ''  # 涨跌百分比
+                        volume = stock_item.get(keys[6], '') if len(keys) > 6 else ''  # 成交量
+                        
+                        session.execute(insert_sql, {
+                            'record_id': record_id,
+                            'symbol': symbol,
+                            'name': name,
+                            'price': self._safe_decimal(price),
+                            'price_change': self._safe_decimal(change),
+                            'change_percent': self._safe_decimal(change_percent),
+                            'volume': self._safe_int(volume),
+                            'ranking': i
+                        })
+            elif isinstance(gainers_data, dict):
+                # 处理dict格式的美股数据（旧格式兼容）
                 for i, (symbol, stock_data) in enumerate(gainers_data.items(), 1):
                     if isinstance(stock_data, dict):
                         insert_sql = text("""
@@ -266,8 +313,13 @@ class DatabaseManager:
     
     def _save_a_stock_stats_data(self, session, record_id: int, data: Dict[str, Any]):
         """保存A股统计数据"""
-        # A股相关的数据keys
-        a_stock_keys = ['Astock_stats', 'stock_updown_summary']
+        # A股相关的数据keys（支持更多实际key）
+        a_stock_keys = [
+            'Astock_stats', 'stock_updown_summary', 'stock_limit_summary',
+            'shanghai_index', 'shenzhen_index', 'gem_index',
+            'industry_top_gainers', 'industry_top_losers', 'industry_top_inflows',
+            'northbound_trade', 'stock_limit_up_list', 'stock_limit_down_list'
+        ]
         
         for key in a_stock_keys:
             if key in data:

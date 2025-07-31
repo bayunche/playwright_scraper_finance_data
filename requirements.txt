@@ -22,3 +22,4 @@ jieba
 pymysql
 sqlalchemy
 python-dotenv
+aiofiles
